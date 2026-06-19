@@ -232,9 +232,11 @@ async function syncToSheet(action, payload) {
   syncStatus = 'syncing';
   renderSyncBar();
   try {
+    // Usamos text/plain para evitar que el navegador haga un preflight CORS
+    // que Google Apps Script no responde correctamente.
     const res = await fetch(SHEET_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify({ action, payload })
     });
     const data = await res.json();
