@@ -202,6 +202,8 @@ let state = {
   investments: { Acciones:[], Bonos:[], CEDEARs:[] }, // [{id,name,amount,currency}]
   investHistory: [],   // {id,date,type,name,amount,currency,action}
   investSnapshots: [], // {id, month, type, name, currency, contribution, value}
+  investCustomTypes: [],   // ['Cripto', 'FCI', ...] tipos agregados por el usuario
+  investCustomOptions: {}, // {Acciones:['NUEVA'], Cripto:['BTC','ETH'], ...} bienes agregados por el usuario
   budgets: {},         // {'2026-06': {ARS:0, USD:0}}
 };
 
@@ -211,6 +213,11 @@ let syncStatus = 'idle'; // idle | syncing | ok | error
 let lastSync = null;
 let offlineMode = !SHEET_URL;
 let investChartMode = 'total'; // 'total' o el nombre de un bien específico
+let expandedInvestMonths = {}; // {'2026-06': true}
+let invLoadType = '';   // tipo elegido en el selector de carga
+let invLoadName = '';   // bien elegido en el selector de carga
+let invLoadNewType = false;
+let invLoadNewName = false;
 
 // ============================================================
 // UTILS
@@ -277,7 +284,13 @@ async function loadFromSheet() {
   try {
     const res = await fetch(SHEET_URL + '?action=getAll');
     const data = await res.json();
-    if (data.state) { state = data.state; if (!state.investSnapshots) state.investSnapshots = []; saveLocal(); }
+    if (data.state) {
+      state = data.state;
+      if (!state.investSnapshots) state.investSnapshots = [];
+      if (!state.investCustomTypes) state.investCustomTypes = [];
+      if (!state.investCustomOptions) state.investCustomOptions = {};
+      saveLocal();
+    }
     syncStatus = 'ok'; lastSync = new Date();
   } catch(e) {
     loadLocal();
@@ -423,7 +436,7 @@ function getAllInvestKeys() {
   // Devuelve [{type,name,currency}] para cada bien existente (cargado en investments)
   if (!state.investSnapshots) state.investSnapshots = [];
   const keys = [];
-  INVEST_TYPES.forEach(type => {
+  getAllTypes().forEach(type => {
     (state.investments[type]||[]).forEach(it => {
       if (!keys.find(k=>k.type===type&&k.name===it.name&&k.currency===it.currency)) {
         keys.push({type, name: it.name, currency: it.currency});
@@ -431,6 +444,43 @@ function getAllInvestKeys() {
     });
   });
   return keys;
+}
+
+function getAllTypes() {
+  if (!state.investCustomTypes) state.investCustomTypes = [];
+  if (!state.investments) state.investments = {};
+  const fromState = Object.keys(state.investments);
+  const all = [...new Set([...INVEST_TYPES, ...state.investCustomTypes, ...fromState])];
+  return all;
+}
+
+function getTypeColor(type) {
+  return INVEST_COLORS[type] || '#94a3b8';
+}
+
+function getOptionsForType(type) {
+  if (!state.investCustomOptions) state.investCustomOptions = {};
+  const fixed = INVEST_OPTIONS[type] || [];
+  const custom = state.investCustomOptions[type] || [];
+  const fromExisting = (state.investments[type]||[]).map(it=>it.name);
+  return [...new Set([...fixed, ...custom, ...fromExisting])];
+}
+
+function registerNewType(type) {
+  if (!state.investCustomTypes) state.investCustomTypes = [];
+  if (!INVEST_TYPES.includes(type) && !state.investCustomTypes.includes(type)) {
+    state.investCustomTypes.push(type);
+  }
+  if (!state.investments[type]) state.investments[type] = [];
+}
+
+function registerNewOption(type, name) {
+  if (!state.investCustomOptions) state.investCustomOptions = {};
+  if (!state.investCustomOptions[type]) state.investCustomOptions[type] = [];
+  const fixed = INVEST_OPTIONS[type] || [];
+  if (!fixed.includes(name) && !state.investCustomOptions[type].includes(name)) {
+    state.investCustomOptions[type].push(name);
+  }
 }
 
 function getSnapshot(type, name, currency, month) {
@@ -974,13 +1024,15 @@ function renderInvest() {
     )
   ));
 
+  const allTypes = getAllTypes();
+
   // Grand totals
   const grandTotal = { ARS:0, USD:0 };
-  INVEST_TYPES.forEach(type => {
+  allTypes.forEach(type => {
     (state.investments[type]||[]).forEach(it => { grandTotal[it.currency] += Number(it.amount); });
   });
   const typeTotal = {};
-  INVEST_TYPES.forEach(type => {
+  allTypes.forEach(type => {
     typeTotal[type] = { ARS:0, USD:0 };
     (state.investments[type]||[]).forEach(it => { typeTotal[type][it.currency] += Number(it.amount); });
   });
@@ -988,16 +1040,16 @@ function renderInvest() {
   // Top stats
   const sg = el('div',{className:'grid-3',style:{marginBottom:'16px'}});
   sg.appendChild(statCard(`Total invertido (${currency})`, fmt(grandTotal[currency],currency),'','var(--purple)','💼'));
-  INVEST_TYPES.forEach(type => {
+  allTypes.filter(t=>typeTotal[t][currency]>0||INVEST_TYPES.includes(t)).forEach(type => {
     const pct = grandTotal[currency]>0 ? ((typeTotal[type][currency]/grandTotal[currency])*100).toFixed(1)+'%' : '0%';
-    sg.appendChild(statCard(type, fmt(typeTotal[type][currency],currency), pct+' del total', INVEST_COLORS[type], type==='Acciones'?'📈':type==='Bonos'?'🏦':'🌐'));
+    sg.appendChild(statCard(type, fmt(typeTotal[type][currency],currency), pct+' del total', getTypeColor(type), type==='Acciones'?'📈':type==='Bonos'?'🏦':type==='CEDEARs'?'🌐':'💠'));
   });
   div.appendChild(sg);
 
   // Resumen del mes actual (aporte + variación)
   const monthContribution = portfolioContributionForMonth(cm, currency);
   const monthVariation = portfolioVariationForMonth(cm, currency);
-  const hasSnapshotsThisMonth = state.investSnapshots.some(s=>s.month===cm&&s.currency===currency);
+  const hasSnapshotsThisMonth = (state.investSnapshots||[]).some(s=>s.month===cm&&s.currency===currency);
   if (hasSnapshotsThisMonth) {
     const sg2 = el('div',{className:'grid-3',style:{marginBottom:'16px'}});
     sg2.appendChild(statCard(`Aportado en ${monthName(cm).split(' ')[0]}`, fmt(monthContribution,currency),'','var(--cyan)','➕'));
@@ -1006,7 +1058,7 @@ function renderInvest() {
   }
 
   // Pie chart de distribución actual
-  const pieData = INVEST_TYPES.map(t=>({name:t,value:typeTotal[t][currency],color:INVEST_COLORS[t]})).filter(d=>d.value>0);
+  const pieData = allTypes.map(t=>({name:t,value:typeTotal[t][currency],color:getTypeColor(t)})).filter(d=>d.value>0);
   if (pieData.length > 0) {
     const pieDiv = el('div',{className:'card card-lg',style:{marginBottom:'16px',textAlign:'center'}});
     pieDiv.appendChild(el('h3',{style:{fontSize:'15px',marginBottom:'14px'}},`Distribución actual (${currency})`));
@@ -1045,9 +1097,9 @@ function renderInvest() {
     } else {
       const key = allKeys.find(k=>k.name===investChartMode);
       chartData = months
-        .filter(m => key && state.investSnapshots.some(s=>s.type===key.type&&s.name===key.name&&s.currency===currency&&s.month<=m))
+        .filter(m => key && (state.investSnapshots||[]).some(s=>s.type===key.type&&s.name===key.name&&s.currency===currency&&s.month<=m))
         .map(m => {
-          const snaps = state.investSnapshots
+          const snaps = (state.investSnapshots||[])
             .filter(s=>s.type===key.type&&s.name===key.name&&s.currency===currency&&s.month<=m)
             .sort((a,b)=>b.month.localeCompare(a.month));
           return { month: m, value: snaps.length ? snaps[0].value : 0 };
@@ -1061,100 +1113,221 @@ function renderInvest() {
       const diff = last - first;
       const pctDiff = first>0 ? (diff/first*100) : 0;
       evolDiv.appendChild(el('p',{style:{fontSize:'12.5px',color:diff>=0?'var(--green)':'var(--red)',marginTop:'10px',fontWeight:'600'}},
-        `${diff>=0?'📈':'📉'} ${diff>=0?'+':''}${fmt(diff,currency)} (${diff>=0?'+':''}${pctDiff.toFixed(1)}%) desde ${monthShort(chartData[0].month)}`
+        `${diff>=0?'📈':'📉'} ${diff>=0?'+':''}${fmt(diff,currency)} (${diff>=0?'+':''}${pctDiff.toFixed(1)}%) desde ${monthShort(chartData[0].month)} '${chartData[0].month.slice(2,4)}`
       ));
     }
   }
   div.appendChild(evolDiv);
 
   // ============================================================
-  // ACTUALIZACIÓN MENSUAL
+  // ACORDEÓN MENSUAL
   // ============================================================
-  const updateDiv = el('div',{className:'card card-lg',style:{marginBottom:'16px'}});
-  updateDiv.appendChild(el('h3',{style:{fontSize:'15px',marginBottom:'4px'}},`📝 Actualizar ${monthName(cm)}`));
-  updateDiv.appendChild(el('p',{style:{fontSize:'12px',color:'var(--text3)',marginBottom:'14px'}},'Por cada bien, indicá cuánto aportaste este mes (0 si no agregaste nada) y el valor actual total.'));
+  const accordionMonths = [...new Set([...getAllMonthsWithSnapshots(), cm])].sort().reverse();
+  accordionMonths.forEach(month => {
+    const isExpanded = month === cm ? (expandedInvestMonths[month] !== false) : !!expandedInvestMonths[month];
+    const monthDiv = el('div',{className:'card card-lg',style:{marginBottom:'12px',padding:'0',overflow:'hidden'}});
+    const headerBtn = el('button',{
+      style:{width:'100%',display:'flex',justifyContent:'space-between',alignItems:'center',padding:'16px 20px',background:'none',border:'none',cursor:'pointer',color:'var(--text)'},
+      onClick: ()=>{ expandedInvestMonths[month] = !isExpanded; render(); }
+    },
+      el('span',{style:{fontSize:'14px',fontWeight:'700'}}, `📅 ${monthName(month)}`),
+      el('span',{style:{fontSize:'16px',color:'var(--text3)'}}, isExpanded?'▲':'▼')
+    );
+    monthDiv.appendChild(headerBtn);
 
-  if (allKeys.length === 0) {
-    updateDiv.appendChild(el('p',{style:{color:'var(--text3)',fontSize:'12.5px'}},'Agregá primero un bien más abajo.'));
-  } else {
-    allKeys.forEach(k => {
-      const existing = getSnapshot(k.type, k.name, k.currency, cm);
-      const wrap = el('div',{style:{background:'var(--surface2)',borderRadius:'10px',padding:'12px',marginBottom:'10px'}});
-      wrap.appendChild(el('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'8px'}},
-        el('span',{style:{fontSize:'13px',fontWeight:'700'}}, k.name),
-        el('span',{className:'tag',style:{background:`${INVEST_COLORS[k.type]}22`,color:INVEST_COLORS[k.type]}}, k.type)
-      ));
-      const row = el('div',{className:'row'});
-      const contribInput = el('input',{type:'number',placeholder:'Aporte este mes',value:existing?existing.contribution:''});
-      const valueInput = el('input',{type:'number',placeholder:'Valor actual total',value:existing?existing.value:''});
-      row.appendChild(contribInput); row.appendChild(valueInput);
-      wrap.appendChild(row);
-      wrap.appendChild(el('button',{
-        className:'btn-secondary', style:{marginTop:'8px',fontSize:'12px',width:'100%'},
-        onClick: async ()=>{
-          if (valueInput.value === '') { alert('Ingresá el valor actual'); return; }
-          setSnapshot(k.type, k.name, k.currency, cm, contribInput.value||0, valueInput.value);
-          await pushState();
-        }
-      }, existing?'Actualizar':'Guardar'));
-      updateDiv.appendChild(wrap);
-    });
-  }
-  div.appendChild(updateDiv);
+    if (isExpanded) {
+      const body = el('div',{style:{padding:'0 20px 20px'}});
+
+      if (month === cm) {
+        body.appendChild(renderInvestLoadSelector(cm));
+      }
+
+      const snapsThisMonth = (state.investSnapshots||[]).filter(s=>s.month===month&&s.currency===currency);
+      if (snapsThisMonth.length === 0) {
+        body.appendChild(el('p',{style:{color:'var(--text3)',fontSize:'12.5px',marginTop:'10px'}}, month===cm?'Todavía no cargaste ningún bien este mes.':'Sin registros este mes.'));
+      } else {
+        body.appendChild(el('h4',{style:{fontSize:'12.5px',color:'var(--text2)',margin:'14px 0 8px'}}, 'Ya actualizado este mes:'));
+        snapsThisMonth.forEach(s => {
+          const prevVal = getPrevSnapshotValue(s.type, s.name, s.currency, month);
+          let variationTxt = null;
+          if (prevVal !== null) {
+            const expected = prevVal + Number(s.contribution);
+            const variation = s.value - expected;
+            const pctV = expected>0 ? (variation/expected*100) : 0;
+            variationTxt = `${variation>=0?'+':''}${fmt(variation,s.currency)} (${variation>=0?'+':''}${pctV.toFixed(1)}%)`;
+          }
+          const row = el('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'9px 0',borderBottom:'1px solid var(--border)'}},
+            el('div',{},
+              el('div',{style:{fontSize:'13px',fontWeight:'600'}}, s.name + ' · ' + s.type),
+              el('div',{style:{fontSize:'11px',color:'var(--text3)'}}, `Aporte: ${fmt(s.contribution,s.currency)}`)
+            ),
+            el('div',{style:{textAlign:'right'}},
+              el('div',{style:{fontSize:'13px',fontWeight:'700'}}, fmt(s.value,s.currency)),
+              variationTxt ? el('div',{style:{fontSize:'11px',color: s.value-( (prevVal||0)+Number(s.contribution) )>=0 ? 'var(--green)':'var(--red)'}}, variationTxt) : null
+            )
+          );
+          body.appendChild(row);
+        });
+      }
+      monthDiv.appendChild(body);
+    }
+    div.appendChild(monthDiv);
+  });
 
   // ============================================================
-  // BLOQUES POR TIPO (agregar/eliminar bienes)
+  // BLOQUES POR TIPO (ver bienes y eliminarlos)
   // ============================================================
-  INVEST_TYPES.forEach(type => {
+  allTypes.forEach(type => {
     const items = (state.investments[type]||[]).filter(it=>it.currency===currency);
+    if (items.length === 0) return;
     const block = el('div',{className:'card card-lg',style:{marginBottom:'16px'}});
     block.appendChild(el('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'12px'}},
       el('h3',{style:{fontSize:'15px',display:'flex',alignItems:'center',gap:'8px'}},
-        el('span',{style:{width:'10px',height:'10px',borderRadius:'50%',background:INVEST_COLORS[type],display:'inline-block'}}),
+        el('span',{style:{width:'10px',height:'10px',borderRadius:'50%',background:getTypeColor(type),display:'inline-block'}}),
         type
-      ),
-      el('button',{className:'btn-primary',style:{fontSize:'12px'},onClick:()=>openInvestForm(type)},'+ Agregar')
+      )
     ));
-
-    if (items.length === 0) {
-      block.appendChild(el('p',{style:{color:'var(--text3)',fontSize:'12.5px'}},`Sin bienes en ${currency} en esta categoría.`));
-    } else {
-      items.forEach(it => {
-        const pct = grandTotal[currency]>0?((Number(it.amount)/grandTotal[currency])*100).toFixed(1):0;
-        const pctType = typeTotal[type][currency]>0?((Number(it.amount)/typeTotal[type][currency])*100).toFixed(1):0;
-        const row = el('div',{className:'list-item'},
-          el('div',{style:{flex:'1'}},
-            el('div',{style:{fontSize:'13px',fontWeight:'600'}},it.name),
-            el('div',{style:{display:'flex',gap:'8px',marginTop:'4px'}},
-              el('span',{className:'tag tag-purple'},pct+'% total'),
-              el('span',{className:'tag',style:{background:`${INVEST_COLORS[type]}22`,color:INVEST_COLORS[type]}},pctType+'% de '+type)
-            ),
-            el('div',{className:'progress-bar',style:{marginTop:'6px',height:'6px'}},
-              el('div',{className:'progress-fill',style:{width:pctType+'%',background:INVEST_COLORS[type]}})
-            )
+    items.forEach(it => {
+      const pct = grandTotal[currency]>0?((Number(it.amount)/grandTotal[currency])*100).toFixed(1):0;
+      const pctType = typeTotal[type][currency]>0?((Number(it.amount)/typeTotal[type][currency])*100).toFixed(1):0;
+      const row = el('div',{className:'list-item'},
+        el('div',{style:{flex:'1'}},
+          el('div',{style:{fontSize:'13px',fontWeight:'600'}},it.name),
+          el('div',{style:{display:'flex',gap:'8px',marginTop:'4px'}},
+            el('span',{className:'tag tag-purple'},pct+'% total'),
+            el('span',{className:'tag',style:{background:`${getTypeColor(type)}22`,color:getTypeColor(type)}},pctType+'% de '+type)
           ),
-          el('div',{style:{textAlign:'right',marginLeft:'14px'}},
-            el('div',{style:{fontSize:'14px',fontWeight:'700'}},fmt(it.amount,it.currency)),
-            el('button',{className:'btn-icon',style:{marginTop:'4px'},onClick:async()=>{
-              if(!confirm(`¿Eliminar ${it.name}?`)) return;
-              state.investments[type] = state.investments[type].filter(x=>x.id!==it.id);
-              state.investHistory.push({id:uid(),date:today(),type,name:it.name,amount:it.amount,currency:it.currency,action:'remove'});
-              await pushState();
-            }},'🗑')
+          el('div',{className:'progress-bar',style:{marginTop:'6px',height:'6px'}},
+            el('div',{className:'progress-fill',style:{width:pctType+'%',background:getTypeColor(type)}})
           )
-        );
-        block.appendChild(row);
-      });
-    }
+        ),
+        el('div',{style:{textAlign:'right',marginLeft:'14px'}},
+          el('div',{style:{fontSize:'14px',fontWeight:'700'}},fmt(it.amount,it.currency)),
+          el('button',{className:'btn-icon',style:{marginTop:'4px'},onClick:async()=>{
+            if(!confirm(`¿Eliminar ${it.name}? Esto no borra su historial mensual.`)) return;
+            state.investments[type] = state.investments[type].filter(x=>x.id!==it.id);
+            state.investHistory.push({id:uid(),date:today(),type,name:it.name,amount:it.amount,currency:it.currency,action:'remove'});
+            await pushState();
+          }},'🗑')
+        )
+      );
+      block.appendChild(row);
+    });
     div.appendChild(block);
   });
 
   return div;
 }
 
+function renderInvestLoadSelector(cm) {
+  const wrap = el('div',{style:{background:'var(--surface2)',borderRadius:'10px',padding:'14px',marginTop:'6px'}});
+  wrap.appendChild(el('h4',{style:{fontSize:'13px',marginBottom:'10px'}},'➕ Cargar / actualizar un bien'));
+
+  const typeRow = el('div',{className:'row',style:{marginBottom:'10px'}});
+  const allTypes = getAllTypes();
+  const typeSel = el('select',{},
+    el('option',{value:''},'-- Elegí el tipo --'),
+    ...allTypes.map(t=>el('option',{value:t, selected: t===invLoadType?'selected':null},t)),
+    el('option',{value:'__OTRO__'},'+ Otro tipo nuevo')
+  );
+  typeSel.addEventListener('change', e=>{
+    if (e.target.value === '__OTRO__') { invLoadNewType = true; invLoadType=''; }
+    else { invLoadNewType = false; invLoadType = e.target.value; }
+    invLoadName=''; invLoadNewName=false;
+    render();
+  });
+  typeRow.appendChild(typeSel);
+  wrap.appendChild(typeRow);
+
+  if (invLoadNewType) {
+    const newTypeInput = el('input',{type:'text',placeholder:'Nombre del tipo nuevo (ej: Cripto)'});
+    let newTypeVal = '';
+    newTypeInput.addEventListener('input', e=>newTypeVal=e.target.value);
+    wrap.appendChild(field('Nuevo tipo', newTypeInput));
+    wrap.appendChild(el('button',{className:'btn-secondary',style:{fontSize:'12px',marginBottom:'10px'},onClick:()=>{
+      if (!newTypeVal.trim()) { alert('Ingresá un nombre'); return; }
+      registerNewType(newTypeVal.trim());
+      invLoadType = newTypeVal.trim();
+      invLoadNewType = false;
+      render();
+    }},'Confirmar tipo'));
+    return wrap;
+  }
+
+  if (!invLoadType) return wrap;
+
+  // Selector de bien
+  const options = getOptionsForType(invLoadType);
+  const nameRow = el('div',{className:'row',style:{marginBottom:'10px'}});
+  const nameSel = el('select',{},
+    el('option',{value:''},'-- Elegí el bien --'),
+    ...options.map(o=>el('option',{value:o, selected:o===invLoadName?'selected':null},o)),
+    el('option',{value:'__OTRO__'},'+ Otro bien nuevo')
+  );
+  nameSel.addEventListener('change', e=>{
+    if (e.target.value === '__OTRO__') { invLoadNewName = true; invLoadName=''; }
+    else { invLoadNewName = false; invLoadName = e.target.value; }
+    render();
+  });
+  nameRow.appendChild(nameSel);
+  wrap.appendChild(nameRow);
+
+  if (invLoadNewName) {
+    const newNameInput = el('input',{type:'text',placeholder:'Nombre del bien nuevo (ej: BTC)'});
+    let newNameVal = '';
+    newNameInput.addEventListener('input', e=>newNameVal=e.target.value);
+    wrap.appendChild(field('Nuevo bien', newNameInput));
+    wrap.appendChild(el('button',{className:'btn-secondary',style:{fontSize:'12px',marginBottom:'10px'},onClick:()=>{
+      if (!newNameVal.trim()) { alert('Ingresá un nombre'); return; }
+      registerNewOption(invLoadType, newNameVal.trim());
+      invLoadName = newNameVal.trim();
+      invLoadNewName = false;
+      render();
+    }},'Confirmar bien'));
+    return wrap;
+  }
+
+  if (!invLoadName) return wrap;
+
+  // Formulario de aporte + valor
+  const existing = getSnapshot(invLoadType, invLoadName, currency, cm);
+  const existingInInvestments = (state.investments[invLoadType]||[]).find(it=>it.name===invLoadName&&it.currency===currency);
+  const contribInput = el('input',{type:'number',placeholder:'Aporte este mes',value:existing?existing.contribution:''});
+  const valueInput = el('input',{type:'number',placeholder:'Valor actual total',value:existing?existing.value:''});
+  const row2 = el('div',{className:'row',style:{marginBottom:'10px'}});
+  row2.appendChild(contribInput); row2.appendChild(valueInput);
+  wrap.appendChild(row2);
+
+  wrap.appendChild(el('button',{
+    className:'btn-primary', style:{width:'100%'},
+    onClick: async ()=>{
+      if (valueInput.value === '') { alert('Ingresá el valor actual'); return; }
+      const contribution = Number(contribInput.value)||0;
+      const value = Number(valueInput.value);
+
+      setSnapshot(invLoadType, invLoadName, currency, cm, contribution, value);
+
+      // Si el bien todavía no existe en investments, lo agregamos con el valor actual
+      if (!existingInInvestments) {
+        if (!state.investments[invLoadType]) state.investments[invLoadType] = [];
+        state.investments[invLoadType].push({id:uid(), name:invLoadName, amount:value, currency});
+        state.investHistory.push({id:uid(),date:today(),type:invLoadType,name:invLoadName,amount:value,currency,action:'add'});
+      } else {
+        // Actualizamos el monto base mostrado en el listado al valor más reciente
+        existingInInvestments.amount = value;
+      }
+
+      invLoadType=''; invLoadName=''; invLoadNewType=false; invLoadNewName=false;
+      await pushState();
+    }
+  }, existing ? 'Actualizar' : 'Guardar'));
+
+  return wrap;
+}
+
 function lineChart(data, cur) {
   // data: [{month, value}]
-  const w = 600, h = 220, padL = 50, padR = 16, padT = 16, padB = 28;
+  const w = 600, h = 240, padL = 70, padR = 16, padT = 16, padB = 32;
   const wrapper = document.createElement('div');
   if (data.length === 0) { wrapper.innerHTML = '<p style="color:#64748b;font-size:13px">Sin datos.</p>'; return wrapper; }
 
@@ -1176,21 +1349,30 @@ function lineChart(data, cur) {
   const trendUp = points[points.length-1].value >= points[0].value;
   const lineColor = trendUp ? '#34d399' : '#f87171';
 
+  function shortNum(n) {
+    const abs = Math.abs(n);
+    if (abs >= 1000000) return (n/1000000).toFixed(1)+'M';
+    if (abs >= 1000) return (n/1000).toFixed(0)+'K';
+    return n.toFixed(0);
+  }
+
   let svg = `<svg width="100%" viewBox="0 0 ${w} ${h}" style="overflow:visible">`;
-  // grid lines
-  for (let i=0;i<=3;i++) {
-    const gy = padT + i*(h-padT-padB)/3;
+  // grid lines + Y axis labels
+  for (let i=0;i<=4;i++) {
+    const gy = padT + i*(h-padT-padB)/4;
+    const gv = max - i*(range/4);
     svg += `<line x1="${padL}" y1="${gy}" x2="${w-padR}" y2="${gy}" stroke="#1e2536" stroke-width="1"/>`;
+    svg += `<text x="${padL-8}" y="${gy+3}" font-size="10" fill="#64748b" text-anchor="end">${shortNum(gv)} ${cur}</text>`;
   }
   svg += `<path d="${areaD}" fill="${lineColor}" opacity="0.12"/>`;
   svg += `<path d="${pathD}" fill="none" stroke="${lineColor}" stroke-width="2.5"/>`;
   points.forEach(p => {
     svg += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="4" fill="${lineColor}"/>`;
   });
-  // x labels
+  // x labels (mes y año)
   points.forEach((p,i) => {
     if (data.length > 8 && i % Math.ceil(data.length/8) !== 0 && i !== points.length-1) return;
-    svg += `<text x="${p.x.toFixed(1)}" y="${h-8}" font-size="10" fill="#64748b" text-anchor="middle">${monthShort(p.month)}</text>`;
+    svg += `<text x="${p.x.toFixed(1)}" y="${h-10}" font-size="10" fill="#64748b" text-anchor="middle">${monthShort(p.month)} '${p.month.slice(2,4)}</text>`;
   });
   svg += `</svg>`;
 
@@ -1378,38 +1560,6 @@ function openCardDates(cardId, month) {
   const overlay = openModal(div,`Fechas — ${card.name}`);
 }
 
-function openInvestForm(type) {
-  const div = document.createElement('div');
-  let name = INVEST_OPTIONS[type][0] || '', amount='', cur='ARS';
-
-  const options = INVEST_OPTIONS[type] || [];
-  const nameSel = el('select',{}, ...options.map(o=>el('option',{value:o},o)));
-  nameSel.addEventListener('change',e=>name=e.target.value);
-  div.appendChild(field('Bien',nameSel));
-
-  const amtRow = el('div',{className:'row'});
-  const amtInput = el('input',{type:'number',placeholder:'0.00',style:{flex:'1'}});
-  amtInput.addEventListener('input',e=>amount=e.target.value);
-  const curSel = el('select',{style:{flex:'0 0 90px'}},el('option',{value:'ARS'},'ARS'),el('option',{value:'USD'},'USD'));
-  curSel.addEventListener('change',e=>cur=e.target.value);
-  amtRow.appendChild(amtInput); amtRow.appendChild(curSel);
-  div.appendChild(field('Monto invertido',amtRow));
-
-  const saveBtn = el('button',{className:'btn-primary',style:{width:'100%',padding:'12px'},onClick:async()=>{
-    if (!name||!amount||Number(amount)<=0){alert('Completá todos los campos');return;}
-    const already = (state.investments[type]||[]).find(it=>it.name===name&&it.currency===cur);
-    if (already) { alert('Ese bien ya está agregado en esta moneda. Usá la actualización mensual para modificar su valor.'); return; }
-    const item={id:uid(),name,amount:Number(amount),currency:cur};
-    state.investments[type].push(item);
-    state.investHistory.push({id:uid(),date:today(),type,name,amount:Number(amount),currency:cur,action:'add'});
-    setSnapshot(type, name, cur, curMonth(), 0, Number(amount));
-    overlay.remove();
-    await pushState();
-  }},'Guardar');
-  div.appendChild(saveBtn);
-  const overlay = openModal(div,`Agregar a ${type}`);
-}
-
 function openReport() {
   const cm = curMonth();
   const income = monthlyIncome(cm,currency);
@@ -1488,6 +1638,8 @@ function openReport() {
 window.initApp = function() {
   loadLocal();
   if (!state.investSnapshots) state.investSnapshots = [];
+  if (!state.investCustomTypes) state.investCustomTypes = [];
+  if (!state.investCustomOptions) state.investCustomOptions = {};
   loadFromSheet();
 }
 </script>
