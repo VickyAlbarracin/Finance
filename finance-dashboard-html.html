@@ -24,7 +24,7 @@
   input:focus, select:focus { border-color: var(--cyan); }
   button { cursor: pointer; font-family: inherit; border: none; }
   .btn-primary {
-    background: var(--grad); color: #0a0e1a; font-weight: 700;
+    background: var(--cyan); color: #0a0e1a; font-weight: 700;
     padding: 9px 16px; border-radius: 10px; font-size: 13px;
   }
   .btn-secondary {
@@ -118,6 +118,11 @@
   .sync-dot.offline { background: var(--yellow); }
   .cuota-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); }
   .cuota-row:last-child { border-bottom: none; }
+  .pill-btn {
+    padding: 6px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;
+    background: var(--surface2); color: var(--text2); border: 1px solid var(--border2); cursor:pointer;
+  }
+  .pill-btn.active { background: var(--cyan); color: #0a0e1a; border-color: var(--cyan); }
   @media (max-width: 600px) {
     .grid-2 { grid-template-columns: 1fr; }
     .grid-3 { grid-template-columns: 1fr 1fr; }
@@ -183,6 +188,12 @@ const COLORS = ['#22d3ee','#a78bfa','#fb923c','#34d399','#f472b6','#facc15','#60
 const INVEST_TYPES = ['Acciones','Bonos','CEDEARs'];
 const INVEST_COLORS = { Acciones:'#22d3ee', Bonos:'#a78bfa', CEDEARs:'#fb923c' };
 const PAY_METHODS = ['Efectivo','Débito','Transferencia','Crédito'];
+const INVEST_OPTIONS = {
+  Acciones: ['AGRO','ALUA','BBAR','BMA','GGAL','LOMA','PAMP','TGSU2','TXAR','YPFD'],
+  Bonos: ['AL30','GD38'],
+  CEDEARs: ['DIA','IWM','SPY']
+};
+const BAR_COLORS_LIST = ['#22d3ee','#a78bfa','#fb923c','#34d399','#f472b6','#facc15','#60a5fa','#e879f9'];
 
 let state = {
   movements: [],       // {id, type, amount, currency, category, description, date, payMethod, cardId, installments, installmentAmount, installmentIndex}
@@ -190,6 +201,7 @@ let state = {
   cards: [],           // {id, name, monthDates: {'2026-06': {close:27, due:10}}}
   investments: { Acciones:[], Bonos:[], CEDEARs:[] }, // [{id,name,amount,currency}]
   investHistory: [],   // {id,date,type,name,amount,currency,action}
+  investSnapshots: [], // {id, month, type, name, currency, contribution, value}
   budgets: {},         // {'2026-06': {ARS:0, USD:0}}
 };
 
@@ -198,6 +210,7 @@ let activeTab = 'home';
 let syncStatus = 'idle'; // idle | syncing | ok | error
 let lastSync = null;
 let offlineMode = !SHEET_URL;
+let investChartMode = 'total'; // 'total' o el nombre de un bien específico
 
 // ============================================================
 // UTILS
@@ -212,6 +225,10 @@ function fmt(n, cur) {
 function monthName(ym) {
   const [y,m] = ym.split('-');
   return new Date(y, m-1, 1).toLocaleString('es-AR',{month:'long',year:'numeric'});
+}
+function monthShort(ym) {
+  const [y,m] = ym.split('-');
+  return new Date(y, m-1, 1).toLocaleString('es-AR',{month:'short'}).replace('.','');
 }
 function addMonths(ym, n) {
   const [y,m] = ym.split('-').map(Number);
@@ -400,6 +417,76 @@ function totalCommitted(cur) {
 }
 
 // ============================================================
+// SNAPSHOTS MENSUALES DE INVERSIONES
+// ============================================================
+function getAllInvestKeys() {
+  // Devuelve [{type,name,currency}] para cada bien existente (cargado en investments)
+  const keys = [];
+  INVEST_TYPES.forEach(type => {
+    (state.investments[type]||[]).forEach(it => {
+      if (!keys.find(k=>k.type===type&&k.name===it.name&&k.currency===it.currency)) {
+        keys.push({type, name: it.name, currency: it.currency});
+      }
+    });
+  });
+  return keys;
+}
+
+function getSnapshot(type, name, currency, month) {
+  return state.investSnapshots.find(s=>s.type===type&&s.name===name&&s.currency===currency&&s.month===month);
+}
+
+function getPrevSnapshotValue(type, name, currency, beforeMonth) {
+  const snaps = state.investSnapshots
+    .filter(s=>s.type===type&&s.name===name&&s.currency===currency&&s.month<beforeMonth)
+    .sort((a,b)=>b.month.localeCompare(a.month));
+  return snaps.length ? snaps[0].value : null;
+}
+
+function getAllMonthsWithSnapshots() {
+  const months = new Set(state.investSnapshots.map(s=>s.month));
+  return [...months].sort();
+}
+
+function setSnapshot(type, name, currency, month, contribution, value) {
+  state.investSnapshots = state.investSnapshots.filter(s=>!(s.type===type&&s.name===name&&s.currency===currency&&s.month===month));
+  state.investSnapshots.push({ id: uid(), type, name, currency, month, contribution: Number(contribution)||0, value: Number(value)||0 });
+}
+
+// Valor total de la cartera (en una moneda) para un mes dado: usa el último snapshot <= ese mes para cada bien
+function portfolioValueForMonth(month, cur) {
+  const keys = getAllInvestKeys().filter(k=>k.currency===cur);
+  let total = 0;
+  keys.forEach(k => {
+    const snaps = state.investSnapshots
+      .filter(s=>s.type===k.type&&s.name===k.name&&s.currency===k.currency&&s.month<=month)
+      .sort((a,b)=>b.month.localeCompare(a.month));
+    if (snaps.length) total += snaps[0].value;
+  });
+  return total;
+}
+
+function portfolioContributionForMonth(month, cur) {
+  return state.investSnapshots
+    .filter(s=>s.currency===cur&&s.month===month)
+    .reduce((sum,s)=>sum+Number(s.contribution),0);
+}
+
+function portfolioVariationForMonth(month, cur) {
+  const keys = getAllInvestKeys().filter(k=>k.currency===cur);
+  let variation = 0;
+  keys.forEach(k => {
+    const snap = getSnapshot(k.type,k.name,k.currency,month);
+    if (!snap) return;
+    const prevVal = getPrevSnapshotValue(k.type,k.name,k.currency,month);
+    if (prevVal === null) return; // primer snapshot, no hay variación que calcular
+    const expected = prevVal + Number(snap.contribution);
+    variation += (snap.value - expected);
+  });
+  return variation;
+}
+
+// ============================================================
 // EXPORT / IMPORT JSON
 // ============================================================
 function exportJSON() {
@@ -420,6 +507,7 @@ function importJSON() {
     try {
       const imported = JSON.parse(text);
       state = {...state, ...imported};
+      if (!state.investSnapshots) state.investSnapshots = [];
       await pushState();
       render();
       alert('✅ Datos importados correctamente');
@@ -467,18 +555,10 @@ function renderHeader() {
   const cm = curMonth();
   return el('div', {style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'16px',flexWrap:'wrap',gap:'10px'}},
     el('div', {},
-      el('h1', {style:{fontSize:'22px',background:'linear-gradient(90deg,#22d3ee,#a78bfa)',WebkitBackgroundClip:'text',WebkitTextFillColor:'transparent'}}, '💰 Mis Finanzas'),
+      el('h1', {style:{fontSize:'22px',color:'var(--cyan)'}}, '💰 Mis Finanzas'),
       el('p', {style:{color:'var(--text3)',fontSize:'12px',marginTop:'2px'}}, monthName(cm))
     ),
     el('div', {style:{display:'flex',gap:'8px',alignItems:'center',flexWrap:'wrap'}},
-      // Currency toggle
-      el('div', {style:{display:'flex',background:'var(--surface)',borderRadius:'10px',padding:'3px',border:'1px solid var(--border2)'}},
-        ...['ARS','USD'].map(c => el('button', {
-          className: currency === c ? 'btn-primary' : '',
-          style: currency !== c ? {padding:'6px 14px',background:'transparent',color:'var(--text3)',borderRadius:'8px',fontSize:'13px',fontWeight:'600'} : {fontSize:'13px'},
-          onClick: () => { currency = c; render(); }
-        }, c))
-      ),
       el('button', {className:'btn-secondary', onClick: () => openReport()}, '📋 Reporte'),
       el('button', {className:'btn-secondary', onClick: exportJSON}, '⬇ Exportar'),
       el('button', {className:'btn-secondary', onClick: importJSON}, '⬆ Importar'),
@@ -533,78 +613,80 @@ function renderNav() {
 // ============================================================
 function renderHome() {
   const cm = curMonth();
-  const income = monthlyIncome(cm, currency);
-  const expenses = monthlyExpenses(cm, currency);
-  const balance = income - expenses;
-  const budget = (state.budgets[cm] || {})[currency] || 0;
-  const pct = budget > 0 ? Math.min((expenses / budget) * 100, 100) : 0;
-  const budgetStatus = pct >= 100 ? 'over' : pct >= 80 ? 'warn' : 'ok';
+  const income = { ARS: monthlyIncome(cm,'ARS'), USD: monthlyIncome(cm,'USD') };
+  const expenses = { ARS: monthlyExpenses(cm,'ARS'), USD: monthlyExpenses(cm,'USD') };
+  const balance = { ARS: income.ARS-expenses.ARS, USD: income.USD-expenses.USD };
+  const committed = { ARS: totalCommitted('ARS'), USD: totalCommitted('USD') };
+  const budget = state.budgets[cm] || { ARS:0, USD:0 };
+  const pctARS = budget.ARS > 0 ? Math.min((expenses.ARS / budget.ARS) * 100, 100) : 0;
+  const budgetStatus = pctARS >= 100 ? 'over' : pctARS >= 80 ? 'warn' : 'ok';
   const statusColor = budgetStatus === 'over' ? 'var(--red)' : budgetStatus === 'warn' ? 'var(--yellow)' : 'var(--green)';
-  const committed = totalCommitted(currency);
-  const projection = installmentProjection(3, currency);
+  const projectionARS = installmentProjection(3, 'ARS');
+  const projectionUSD = installmentProjection(3, 'USD');
 
   const div = document.createElement('div');
 
   // Stats row
   const statsGrid = el('div', {className:'grid-3', style:{marginBottom:'16px'}},
-    statCard('Ingresos del mes', fmt(income, currency), '', 'var(--green)', '📥'),
-    statCard('Gastos del mes', fmt(expenses, currency), 'Efectivo + débito + transferencia + cuotas que caen', 'var(--red)', '📤'),
-    statCard('Balance', fmt(balance, currency), '', balance >= 0 ? 'var(--green)' : 'var(--red)', '⚖️'),
-    statCard('Total comprometido', fmt(committed, currency), 'Este mes + cuotas futuras pendientes', 'var(--orange)', '📊'),
+    statCard('Ingresos del mes', income, '', 'var(--green)', '📥'),
+    statCard('Gastos del mes', expenses, 'Efectivo + débito + transferencia + cuotas que caen', 'var(--red)', '📤'),
+    statCard('Balance', balance, '', balance.ARS >= 0 ? 'var(--green)' : 'var(--red)', '⚖️'),
+    statCard('Total comprometido', committed, 'Este mes + cuotas futuras pendientes', 'var(--orange)', '📊'),
   );
   div.appendChild(statsGrid);
 
-  // Budget
+  // Budget (ARS como moneda principal de presupuesto)
   const budgetDiv = el('div', {className:'card card-lg', style:{marginBottom:'16px'}});
   const budgetHeader = el('div', {style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'12px'}},
-    el('h3', {style:{fontSize:'15px'}}, `Presupuesto del mes (${currency})`),
+    el('h3', {style:{fontSize:'15px'}}, `Presupuesto del mes (ARS)`),
     budgetStatus !== 'ok' ? el('span', {style:{color:statusColor,fontSize:'12.5px',fontWeight:'600'}},
       budgetStatus === 'over' ? '🚨 ¡Superaste el presupuesto!' : '⚠️ Cerca del límite'
     ) : el('span',{})
   );
   budgetDiv.appendChild(budgetHeader);
-  if (budget > 0) {
+  if (budget.ARS > 0) {
     budgetDiv.appendChild(el('div',{style:{display:'flex',justifyContent:'space-between',fontSize:'13px',color:'var(--text2)',marginBottom:'8px'}},
-      el('span',{},`${fmt(expenses,currency)} gastado`),
-      el('span',{},`de ${fmt(budget,currency)}`)
+      el('span',{},`${fmt(expenses.ARS,'ARS')} gastado`),
+      el('span',{},`de ${fmt(budget.ARS,'ARS')}`)
     ));
-    const bar = el('div',{className:'progress-bar'}, el('div',{className:'progress-fill',style:{width:pct+'%',background:statusColor}}));
+    const bar = el('div',{className:'progress-bar'}, el('div',{className:'progress-fill',style:{width:pctARS+'%',background:statusColor}}));
     budgetDiv.appendChild(bar);
-    budgetDiv.appendChild(el('p',{style:{fontSize:'11.5px',color:'var(--text3)',marginTop:'6px'}},`${pct.toFixed(1)}% utilizado`));
+    budgetDiv.appendChild(el('p',{style:{fontSize:'11.5px',color:'var(--text3)',marginTop:'6px'}},`${pctARS.toFixed(1)}% utilizado`));
   } else {
-    budgetDiv.appendChild(el('p',{style:{color:'var(--text3)',fontSize:'13px',marginBottom:'10px'}},`No definiste presupuesto para ${monthName(cm)} en ${currency}.`));
+    budgetDiv.appendChild(el('p',{style:{color:'var(--text3)',fontSize:'13px',marginBottom:'10px'}},`No definiste presupuesto para ${monthName(cm)}.`));
   }
   const budgetRow = el('div',{className:'row',style:{marginTop:'12px'}});
-  const budgetInput = el('input',{type:'number',placeholder:`Presupuesto en ${currency}`,style:{flex:'1'}});
+  const budgetInput = el('input',{type:'number',placeholder:`Presupuesto en ARS`,style:{flex:'1'}});
   const budgetBtn = el('button',{className:'btn-primary',onClick:async ()=>{
     const v = Number(budgetInput.value);
     if (!v || v <= 0) return;
     if (!state.budgets[cm]) state.budgets[cm] = {ARS:0,USD:0};
-    state.budgets[cm][currency] = v;
+    state.budgets[cm].ARS = v;
     await pushState();
   }}, 'Definir');
   budgetRow.appendChild(budgetInput); budgetRow.appendChild(budgetBtn);
   budgetDiv.appendChild(budgetRow);
   div.appendChild(budgetDiv);
 
-  // Proyección de cuotas
-  if (projection.some(p => p.total > 0)) {
+  // Proyección de cuotas (ARS, y USD si hay)
+  if (projectionARS.some(p => p.total > 0) || projectionUSD.some(p => p.total > 0)) {
     const projDiv = el('div',{className:'card card-lg',style:{marginBottom:'16px'}});
-    projDiv.appendChild(el('h3',{style:{fontSize:'15px',marginBottom:'14px'}},`📅 Cuotas comprometidas próximos 3 meses (${currency})`));
+    projDiv.appendChild(el('h3',{style:{fontSize:'15px',marginBottom:'14px'}},`📅 Cuotas comprometidas próximos 3 meses`));
     const projGrid = el('div',{className:'grid-3'});
-    projection.forEach(p => {
-      projGrid.appendChild(statCard(monthName(p.month), fmt(p.total,currency), 'en cuotas', p.total > 0 ? 'var(--orange)' : 'var(--text3)', '📆'));
+    projectionARS.forEach((p,i) => {
+      const valObj = { ARS: p.total, USD: projectionUSD[i].total };
+      projGrid.appendChild(statCard(monthName(p.month), valObj, 'en cuotas', p.total > 0 || projectionUSD[i].total>0 ? 'var(--orange)' : 'var(--text3)', '📆'));
     });
     projDiv.appendChild(projGrid);
     div.appendChild(projDiv);
   }
 
-  // Category breakdown
+  // Category breakdown (ARS principal)
   const catDiv = el('div',{className:'card card-lg'});
-  catDiv.appendChild(el('h3',{style:{fontSize:'15px',marginBottom:'14px'}},`Gastos por categoría — ${currency}`));
+  catDiv.appendChild(el('h3',{style:{fontSize:'15px',marginBottom:'14px'}},`Gastos por categoría — ARS`));
   const catData = CATEGORIES.map((c,i) => {
     const total = state.movements
-      .filter(m => m.type==='gasto' && monthOf(m.date)===cm && m.currency===currency && m.category===c && m.payMethod!=='Crédito')
+      .filter(m => m.type==='gasto' && monthOf(m.date)===cm && m.currency==='ARS' && m.category===c && m.payMethod!=='Crédito')
       .reduce((s,m)=>s+Number(m.amount),0);
     return {cat:c,total,color:COLORS[i]};
   }).filter(d=>d.total>0).sort((a,b)=>b.total-a.total);
@@ -616,7 +698,7 @@ function renderHome() {
     catData.forEach(d => {
       const row = el('div',{style:{marginBottom:'10px'}});
       row.appendChild(el('div',{style:{display:'flex',justifyContent:'space-between',fontSize:'13px',marginBottom:'5px'}},
-        el('span',{},d.cat), el('span',{style:{fontWeight:'700'}},fmt(d.total,currency))
+        el('span',{},d.cat), el('span',{style:{fontWeight:'700'}},fmt(d.total,'ARS'))
       ));
       row.appendChild(el('div',{className:'progress-bar'},
         el('div',{className:'progress-fill',style:{width:((d.total/maxVal)*100)+'%',background:d.color}})
@@ -628,13 +710,21 @@ function renderHome() {
   return div;
 }
 
-function statCard(label, value, sub, color, icon) {
+function statCard(label, valueObj, sub, color, icon) {
+  // valueObj puede ser un string (compatibilidad) o {ARS, USD}
   const d = el('div',{className:'stat-card'});
   d.appendChild(el('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center'}},
     el('span',{className:'stat-label'},label),
     el('span',{style:{fontSize:'20px'}},icon||'')
   ));
-  d.appendChild(el('div',{className:'stat-value',style:{color}},value));
+  if (typeof valueObj === 'string') {
+    d.appendChild(el('div',{className:'stat-value',style:{color}},valueObj));
+  } else {
+    d.appendChild(el('div',{className:'stat-value',style:{color}},fmt(valueObj.ARS,'ARS')));
+    if (valueObj.USD) {
+      d.appendChild(el('div',{className:'stat-value',style:{color,fontSize:'14px',opacity:'0.8'}},fmt(valueObj.USD,'USD')));
+    }
+  }
   if (sub) d.appendChild(el('div',{className:'stat-sub'},sub));
   return d;
 }
@@ -654,14 +744,14 @@ function renderMovements() {
 
   // Summary cards
   const movs = state.movements.filter(m => monthOf(m.date) === cm);
-  const incomeTotal = movs.filter(m=>m.type==='ingreso'&&m.currency===currency).reduce((s,m)=>s+Number(m.amount),0);
-  const expenseTotal = movs.filter(m=>m.type==='gasto'&&m.currency===currency&&m.payMethod!=='Crédito').reduce((s,m)=>s+Number(m.amount),0);
-  const installmentsThisMonth = totalInstallmentsByMonth(cm, currency);
+  const incomeTotal = { ARS: movs.filter(m=>m.type==='ingreso'&&m.currency==='ARS').reduce((s,m)=>s+Number(m.amount),0), USD: movs.filter(m=>m.type==='ingreso'&&m.currency==='USD').reduce((s,m)=>s+Number(m.amount),0) };
+  const expenseTotal = { ARS: movs.filter(m=>m.type==='gasto'&&m.currency==='ARS'&&m.payMethod!=='Crédito').reduce((s,m)=>s+Number(m.amount),0), USD: movs.filter(m=>m.type==='gasto'&&m.currency==='USD'&&m.payMethod!=='Crédito').reduce((s,m)=>s+Number(m.amount),0) };
+  const installmentsThisMonth = { ARS: totalInstallmentsByMonth(cm,'ARS'), USD: totalInstallmentsByMonth(cm,'USD') };
 
   const sg = el('div',{className:'grid-3',style:{marginBottom:'16px'}});
-  sg.appendChild(statCard('Ingresos',fmt(incomeTotal,currency),'','var(--green)','📥'));
-  sg.appendChild(statCard('Gastos directos',fmt(expenseTotal,currency),'Sin tarjeta de crédito','var(--red)','💸'));
-  sg.appendChild(statCard('Cuotas del mes',fmt(installmentsThisMonth,currency),'Tarjetas de crédito','var(--orange)','💳'));
+  sg.appendChild(statCard('Ingresos',incomeTotal,'','var(--green)','📥'));
+  sg.appendChild(statCard('Gastos directos',expenseTotal,'Sin tarjeta de crédito','var(--red)','💸'));
+  sg.appendChild(statCard('Cuotas del mes',installmentsThisMonth,'Tarjetas de crédito','var(--orange)','💳'));
   div.appendChild(sg);
 
   // Cuotas arrastradas alert
@@ -800,9 +890,11 @@ function renderCards() {
     ));
 
     // Totals
+    const totalThisMonthObj = { ARS: cardInsts.filter(i=>i.month===cm&&i.currency==='ARS').reduce((s,i)=>s+Number(i.amount),0), USD: cardInsts.filter(i=>i.month===cm&&i.currency==='USD').reduce((s,i)=>s+Number(i.amount),0) };
+    const totalPendingObj = { ARS: cardInsts.filter(i=>!i.paid&&i.currency==='ARS').reduce((s,i)=>s+Number(i.amount),0), USD: cardInsts.filter(i=>!i.paid&&i.currency==='USD').reduce((s,i)=>s+Number(i.amount),0) };
     const totalsRow = el('div',{className:'grid-3',style:{marginBottom:'14px'}});
-    totalsRow.appendChild(statCard('A pagar este mes', fmt(totalThisMonth,currency), monthName(cm), 'var(--red)', '📅'));
-    totalsRow.appendChild(statCard('Total comprometido', fmt(totalPendingAll,currency), 'todas las cuotas pendientes', 'var(--orange)', '📊'));
+    totalsRow.appendChild(statCard('A pagar este mes', totalThisMonthObj, monthName(cm), 'var(--red)', '📅'));
+    totalsRow.appendChild(statCard('Total comprometido', totalPendingObj, 'todas las cuotas pendientes', 'var(--orange)', '📊'));
     cardDiv.appendChild(totalsRow);
 
     // Installments list
@@ -861,8 +953,18 @@ function groupInstallmentsByMov(insts) {
 // INVESTMENTS
 // ============================================================
 function renderInvest() {
+  const cm = curMonth();
   const div = document.createElement('div');
-  div.appendChild(el('h2',{style:{fontSize:'16px',marginBottom:'16px'}},'📈 Inversiones'));
+  div.appendChild(el('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'16px',flexWrap:'wrap',gap:'10px'}},
+    el('h2',{style:{fontSize:'16px'}},'📈 Inversiones'),
+    el('div', {style:{display:'flex',background:'var(--surface)',borderRadius:'10px',padding:'3px',border:'1px solid var(--border2)'}},
+      ...['ARS','USD'].map(c => el('button', {
+        className: currency === c ? 'btn-primary' : '',
+        style: currency !== c ? {padding:'6px 14px',background:'transparent',color:'var(--text3)',borderRadius:'8px',fontSize:'13px',fontWeight:'600'} : {fontSize:'13px'},
+        onClick: () => { currency = c; render(); }
+      }, c))
+    )
+  ));
 
   // Grand totals
   const grandTotal = { ARS:0, USD:0 };
@@ -884,16 +986,117 @@ function renderInvest() {
   });
   div.appendChild(sg);
 
-  // Pie chart (SVG simple)
+  // Resumen del mes actual (aporte + variación)
+  const monthContribution = portfolioContributionForMonth(cm, currency);
+  const monthVariation = portfolioVariationForMonth(cm, currency);
+  const hasSnapshotsThisMonth = state.investSnapshots.some(s=>s.month===cm&&s.currency===currency);
+  if (hasSnapshotsThisMonth) {
+    const sg2 = el('div',{className:'grid-3',style:{marginBottom:'16px'}});
+    sg2.appendChild(statCard(`Aportado en ${monthName(cm).split(' ')[0]}`, fmt(monthContribution,currency),'','var(--cyan)','➕'));
+    sg2.appendChild(statCard('Variación real del mes', (monthVariation>=0?'+':'')+fmt(monthVariation,currency), 'sin contar tus aportes', monthVariation>=0?'var(--green)':'var(--red)', monthVariation>=0?'📈':'📉'));
+    div.appendChild(sg2);
+  }
+
+  // Pie chart de distribución actual
   const pieData = INVEST_TYPES.map(t=>({name:t,value:typeTotal[t][currency],color:INVEST_COLORS[t]})).filter(d=>d.value>0);
   if (pieData.length > 0) {
     const pieDiv = el('div',{className:'card card-lg',style:{marginBottom:'16px',textAlign:'center'}});
-    pieDiv.appendChild(el('h3',{style:{fontSize:'15px',marginBottom:'14px'}},`Distribución (${currency})`));
+    pieDiv.appendChild(el('h3',{style:{fontSize:'15px',marginBottom:'14px'}},`Distribución actual (${currency})`));
     pieDiv.appendChild(simplePie(pieData, grandTotal[currency]));
     div.appendChild(pieDiv);
   }
 
-  // Each type block
+  // ============================================================
+  // GRÁFICO DE EVOLUCIÓN
+  // ============================================================
+  const evolDiv = el('div',{className:'card card-lg',style:{marginBottom:'16px'}});
+  evolDiv.appendChild(el('h3',{style:{fontSize:'15px',marginBottom:'12px'}},'📉 Evolución de la cartera'));
+
+  const allKeys = getAllInvestKeys().filter(k=>k.currency===currency);
+  const selectorRow = el('div',{style:{display:'flex',gap:'6px',marginBottom:'14px',flexWrap:'wrap'}});
+  const totalPill = el('button',{
+    className:'pill-btn'+(investChartMode==='total'?' active':''),
+    onClick:()=>{ investChartMode='total'; render(); }
+  },'Total cartera');
+  selectorRow.appendChild(totalPill);
+  allKeys.forEach(k => {
+    selectorRow.appendChild(el('button',{
+      className:'pill-btn'+(investChartMode===k.name?' active':''),
+      onClick:()=>{ investChartMode=k.name; render(); }
+    }, k.name));
+  });
+  evolDiv.appendChild(selectorRow);
+
+  const months = getAllMonthsWithSnapshots();
+  if (months.length === 0) {
+    evolDiv.appendChild(el('p',{style:{color:'var(--text3)',fontSize:'13px'}},'Todavía no hay registros mensuales. Actualizá el valor de tus bienes este mes para empezar a ver la evolución.'));
+  } else {
+    let chartData;
+    if (investChartMode === 'total') {
+      chartData = months.map(m => ({ month:m, value: portfolioValueForMonth(m, currency) }));
+    } else {
+      const key = allKeys.find(k=>k.name===investChartMode);
+      chartData = months
+        .filter(m => key && state.investSnapshots.some(s=>s.type===key.type&&s.name===key.name&&s.currency===currency&&s.month<=m))
+        .map(m => {
+          const snaps = state.investSnapshots
+            .filter(s=>s.type===key.type&&s.name===key.name&&s.currency===currency&&s.month<=m)
+            .sort((a,b)=>b.month.localeCompare(a.month));
+          return { month: m, value: snaps.length ? snaps[0].value : 0 };
+        });
+    }
+    evolDiv.appendChild(lineChart(chartData, currency));
+
+    if (chartData.length >= 2) {
+      const first = chartData[0].value;
+      const last = chartData[chartData.length-1].value;
+      const diff = last - first;
+      const pctDiff = first>0 ? (diff/first*100) : 0;
+      evolDiv.appendChild(el('p',{style:{fontSize:'12.5px',color:diff>=0?'var(--green)':'var(--red)',marginTop:'10px',fontWeight:'600'}},
+        `${diff>=0?'📈':'📉'} ${diff>=0?'+':''}${fmt(diff,currency)} (${diff>=0?'+':''}${pctDiff.toFixed(1)}%) desde ${monthShort(chartData[0].month)}`
+      ));
+    }
+  }
+  div.appendChild(evolDiv);
+
+  // ============================================================
+  // ACTUALIZACIÓN MENSUAL
+  // ============================================================
+  const updateDiv = el('div',{className:'card card-lg',style:{marginBottom:'16px'}});
+  updateDiv.appendChild(el('h3',{style:{fontSize:'15px',marginBottom:'4px'}},`📝 Actualizar ${monthName(cm)}`));
+  updateDiv.appendChild(el('p',{style:{fontSize:'12px',color:'var(--text3)',marginBottom:'14px'}},'Por cada bien, indicá cuánto aportaste este mes (0 si no agregaste nada) y el valor actual total.'));
+
+  if (allKeys.length === 0) {
+    updateDiv.appendChild(el('p',{style:{color:'var(--text3)',fontSize:'12.5px'}},'Agregá primero un bien más abajo.'));
+  } else {
+    allKeys.forEach(k => {
+      const existing = getSnapshot(k.type, k.name, k.currency, cm);
+      const wrap = el('div',{style:{background:'var(--surface2)',borderRadius:'10px',padding:'12px',marginBottom:'10px'}});
+      wrap.appendChild(el('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'8px'}},
+        el('span',{style:{fontSize:'13px',fontWeight:'700'}}, k.name),
+        el('span',{className:'tag',style:{background:`${INVEST_COLORS[k.type]}22`,color:INVEST_COLORS[k.type]}}, k.type)
+      ));
+      const row = el('div',{className:'row'});
+      const contribInput = el('input',{type:'number',placeholder:'Aporte este mes',value:existing?existing.contribution:''});
+      const valueInput = el('input',{type:'number',placeholder:'Valor actual total',value:existing?existing.value:''});
+      row.appendChild(contribInput); row.appendChild(valueInput);
+      wrap.appendChild(row);
+      wrap.appendChild(el('button',{
+        className:'btn-secondary', style:{marginTop:'8px',fontSize:'12px',width:'100%'},
+        onClick: async ()=>{
+          if (valueInput.value === '') { alert('Ingresá el valor actual'); return; }
+          setSnapshot(k.type, k.name, k.currency, cm, contribInput.value||0, valueInput.value);
+          await pushState();
+        }
+      }, existing?'Actualizar':'Guardar'));
+      updateDiv.appendChild(wrap);
+    });
+  }
+  div.appendChild(updateDiv);
+
+  // ============================================================
+  // BLOQUES POR TIPO (agregar/eliminar bienes)
+  // ============================================================
   INVEST_TYPES.forEach(type => {
     const items = (state.investments[type]||[]).filter(it=>it.currency===currency);
     const block = el('div',{className:'card card-lg',style:{marginBottom:'16px'}});
@@ -938,27 +1141,53 @@ function renderInvest() {
     div.appendChild(block);
   });
 
-  // History
-  const histDiv = el('div',{className:'card card-lg'});
-  histDiv.appendChild(el('h3',{style:{fontSize:'15px',marginBottom:'12px'}},'📋 Historial de inversiones'));
-  const hist = [...(state.investHistory||[])].sort((a,b)=>new Date(b.date)-new Date(a.date));
-  if (hist.length === 0) {
-    histDiv.appendChild(el('p',{style:{color:'var(--text3)',fontSize:'13px'}},'Sin movimientos todavía.'));
-  } else {
-    hist.forEach(h => {
-      histDiv.appendChild(el('div',{className:'list-item'},
-        el('div',{},
-          el('div',{style:{fontSize:'13px',fontWeight:'600'}},h.name+' · '+h.type),
-          el('div',{style:{fontSize:'11.5px',color:'var(--text3)'}},h.date)
-        ),
-        el('span',{style:{fontSize:'13px',fontWeight:'700',color:h.action==='add'?'var(--green)':'var(--red)'}},
-          (h.action==='add'?'+':'−')+fmt(h.amount,h.currency)
-        )
-      ));
-    });
-  }
-  div.appendChild(histDiv);
   return div;
+}
+
+function lineChart(data, cur) {
+  // data: [{month, value}]
+  const w = 600, h = 220, padL = 50, padR = 16, padT = 16, padB = 28;
+  const wrapper = document.createElement('div');
+  if (data.length === 0) { wrapper.innerHTML = '<p style="color:#64748b;font-size:13px">Sin datos.</p>'; return wrapper; }
+
+  const values = data.map(d=>d.value);
+  let min = Math.min(...values), max = Math.max(...values);
+  if (min === max) { min = min*0.95; max = max*1.05 || 1; }
+  const range = max - min || 1;
+
+  const stepX = data.length > 1 ? (w-padL-padR)/(data.length-1) : 0;
+  const points = data.map((d,i) => {
+    const x = padL + i*stepX;
+    const y = padT + (1 - (d.value-min)/range) * (h-padT-padB);
+    return {x,y,...d};
+  });
+
+  const pathD = points.map((p,i) => (i===0?'M':'L')+p.x.toFixed(1)+','+p.y.toFixed(1)).join(' ');
+  const areaD = pathD + ` L${points[points.length-1].x.toFixed(1)},${h-padB} L${points[0].x.toFixed(1)},${h-padB} Z`;
+
+  const trendUp = points[points.length-1].value >= points[0].value;
+  const lineColor = trendUp ? '#34d399' : '#f87171';
+
+  let svg = `<svg width="100%" viewBox="0 0 ${w} ${h}" style="overflow:visible">`;
+  // grid lines
+  for (let i=0;i<=3;i++) {
+    const gy = padT + i*(h-padT-padB)/3;
+    svg += `<line x1="${padL}" y1="${gy}" x2="${w-padR}" y2="${gy}" stroke="#1e2536" stroke-width="1"/>`;
+  }
+  svg += `<path d="${areaD}" fill="${lineColor}" opacity="0.12"/>`;
+  svg += `<path d="${pathD}" fill="none" stroke="${lineColor}" stroke-width="2.5"/>`;
+  points.forEach(p => {
+    svg += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="4" fill="${lineColor}"/>`;
+  });
+  // x labels
+  points.forEach((p,i) => {
+    if (data.length > 8 && i % Math.ceil(data.length/8) !== 0 && i !== points.length-1) return;
+    svg += `<text x="${p.x.toFixed(1)}" y="${h-8}" font-size="10" fill="#64748b" text-anchor="middle">${monthShort(p.month)}</text>`;
+  });
+  svg += `</svg>`;
+
+  wrapper.innerHTML = svg;
+  return wrapper;
 }
 
 function simplePie(data, total) {
@@ -1143,11 +1372,12 @@ function openCardDates(cardId, month) {
 
 function openInvestForm(type) {
   const div = document.createElement('div');
-  let name='', amount='', cur='ARS';
+  let name = INVEST_OPTIONS[type][0] || '', amount='', cur='ARS';
 
-  const nameInput = el('input',{type:'text',placeholder:'Ej: GGAL, AL30, KO'});
-  nameInput.addEventListener('input',e=>name=e.target.value);
-  div.appendChild(field('Nombre del bien',nameInput));
+  const options = INVEST_OPTIONS[type] || [];
+  const nameSel = el('select',{}, ...options.map(o=>el('option',{value:o},o)));
+  nameSel.addEventListener('change',e=>name=e.target.value);
+  div.appendChild(field('Bien',nameSel));
 
   const amtRow = el('div',{className:'row'});
   const amtInput = el('input',{type:'number',placeholder:'0.00',style:{flex:'1'}});
@@ -1158,10 +1388,13 @@ function openInvestForm(type) {
   div.appendChild(field('Monto invertido',amtRow));
 
   const saveBtn = el('button',{className:'btn-primary',style:{width:'100%',padding:'12px'},onClick:async()=>{
-    if (!name.trim()||!amount||Number(amount)<=0){alert('Completá todos los campos');return;}
-    const item={id:uid(),name:name.trim(),amount:Number(amount),currency:cur};
+    if (!name||!amount||Number(amount)<=0){alert('Completá todos los campos');return;}
+    const already = (state.investments[type]||[]).find(it=>it.name===name&&it.currency===cur);
+    if (already) { alert('Ese bien ya está agregado en esta moneda. Usá la actualización mensual para modificar su valor.'); return; }
+    const item={id:uid(),name,amount:Number(amount),currency:cur};
     state.investments[type].push(item);
-    state.investHistory.push({id:uid(),date:today(),type,name:name.trim(),amount:Number(amount),currency:cur,action:'add'});
+    state.investHistory.push({id:uid(),date:today(),type,name,amount:Number(amount),currency:cur,action:'add'});
+    setSnapshot(type, name, cur, curMonth(), 0, Number(amount));
     overlay.remove();
     await pushState();
   }},'Guardar');
@@ -1231,6 +1464,12 @@ function openReport() {
   div.appendChild(el('div',{style:{display:'flex',justifyContent:'space-between',fontSize:'13px',padding:'5px 0',fontWeight:'700'}},
     el('span',{},'Total invertido'), el('span',{},fmt(grandT[currency],currency))
   ));
+  const monthVariation = portfolioVariationForMonth(cm, currency);
+  if (state.investSnapshots.some(s=>s.month===cm&&s.currency===currency)) {
+    div.appendChild(el('div',{style:{display:'flex',justifyContent:'space-between',fontSize:'13px',padding:'5px 0'}},
+      el('span',{},'Variación real del mes'), el('span',{style:{fontWeight:'700',color:monthVariation>=0?'var(--green)':'var(--red)'}},(monthVariation>=0?'+':'')+fmt(monthVariation,currency))
+    ));
+  }
 
   openModal(div,'📋 Reporte mensual',true);
 }
@@ -1240,6 +1479,7 @@ function openReport() {
 // ============================================================
 window.initApp = function() {
   loadLocal();
+  if (!state.investSnapshots) state.investSnapshots = [];
   loadFromSheet();
 }
 </script>
