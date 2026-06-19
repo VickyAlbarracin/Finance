@@ -151,7 +151,7 @@ function tryUnlock() {
     sessionStorage.setItem('finanzas_unlocked', 'true');
     lockScreen.style.display = 'none';
     appDiv.style.display = '';
-    initApp();
+    window.initApp();
   } else {
     lockError.style.display = 'block';
     lockInput.value = '';
@@ -160,13 +160,15 @@ function tryUnlock() {
 lockBtn.addEventListener('click', tryUnlock);
 lockInput.addEventListener('keydown', e => { if (e.key === 'Enter') tryUnlock(); });
 
-if (sessionStorage.getItem('finanzas_unlocked') === 'true') {
-  lockScreen.style.display = 'none';
-  appDiv.style.display = '';
-  initApp();
-} else {
-  lockInput.focus();
-}
+window.addEventListener('DOMContentLoaded', () => {
+  if (sessionStorage.getItem('finanzas_unlocked') === 'true') {
+    lockScreen.style.display = 'none';
+    appDiv.style.display = '';
+    window.initApp();
+  } else {
+    lockInput.focus();
+  }
+});
 
 // ============================================================
 // CONFIG — PEGÁ TU URL DE APPS SCRIPT ACÁ
@@ -1230,7 +1232,7 @@ function openReport() {
 // ============================================================
 // INIT
 // ============================================================
-function initApp() {
+window.initApp = function() {
   loadLocal();
   loadFromSheet();
 }
