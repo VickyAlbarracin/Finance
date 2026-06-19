@@ -277,7 +277,7 @@ async function loadFromSheet() {
   try {
     const res = await fetch(SHEET_URL + '?action=getAll');
     const data = await res.json();
-    if (data.state) { state = data.state; saveLocal(); }
+    if (data.state) { state = data.state; if (!state.investSnapshots) state.investSnapshots = []; saveLocal(); }
     syncStatus = 'ok'; lastSync = new Date();
   } catch(e) {
     loadLocal();
@@ -421,6 +421,7 @@ function totalCommitted(cur) {
 // ============================================================
 function getAllInvestKeys() {
   // Devuelve [{type,name,currency}] para cada bien existente (cargado en investments)
+  if (!state.investSnapshots) state.investSnapshots = [];
   const keys = [];
   INVEST_TYPES.forEach(type => {
     (state.investments[type]||[]).forEach(it => {
@@ -433,10 +434,12 @@ function getAllInvestKeys() {
 }
 
 function getSnapshot(type, name, currency, month) {
+  if (!state.investSnapshots) state.investSnapshots = [];
   return state.investSnapshots.find(s=>s.type===type&&s.name===name&&s.currency===currency&&s.month===month);
 }
 
 function getPrevSnapshotValue(type, name, currency, beforeMonth) {
+  if (!state.investSnapshots) state.investSnapshots = [];
   const snaps = state.investSnapshots
     .filter(s=>s.type===type&&s.name===name&&s.currency===currency&&s.month<beforeMonth)
     .sort((a,b)=>b.month.localeCompare(a.month));
@@ -444,17 +447,20 @@ function getPrevSnapshotValue(type, name, currency, beforeMonth) {
 }
 
 function getAllMonthsWithSnapshots() {
+  if (!state.investSnapshots) state.investSnapshots = [];
   const months = new Set(state.investSnapshots.map(s=>s.month));
   return [...months].sort();
 }
 
 function setSnapshot(type, name, currency, month, contribution, value) {
+  if (!state.investSnapshots) state.investSnapshots = [];
   state.investSnapshots = state.investSnapshots.filter(s=>!(s.type===type&&s.name===name&&s.currency===currency&&s.month===month));
   state.investSnapshots.push({ id: uid(), type, name, currency, month, contribution: Number(contribution)||0, value: Number(value)||0 });
 }
 
 // Valor total de la cartera (en una moneda) para un mes dado: usa el último snapshot <= ese mes para cada bien
 function portfolioValueForMonth(month, cur) {
+  if (!state.investSnapshots) state.investSnapshots = [];
   const keys = getAllInvestKeys().filter(k=>k.currency===cur);
   let total = 0;
   keys.forEach(k => {
@@ -467,12 +473,14 @@ function portfolioValueForMonth(month, cur) {
 }
 
 function portfolioContributionForMonth(month, cur) {
+  if (!state.investSnapshots) state.investSnapshots = [];
   return state.investSnapshots
     .filter(s=>s.currency===cur&&s.month===month)
     .reduce((sum,s)=>sum+Number(s.contribution),0);
 }
 
 function portfolioVariationForMonth(month, cur) {
+  if (!state.investSnapshots) state.investSnapshots = [];
   const keys = getAllInvestKeys().filter(k=>k.currency===cur);
   let variation = 0;
   keys.forEach(k => {
